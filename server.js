@@ -1,53 +1,86 @@
 import express from "express";
-import axios from "axios";
+import fetch from "node-fetch";
 import bodyParser from "body-parser";
 
 const app = express();
 app.use(bodyParser.json());
 
-app.get("/", (req, res) => {
-  res.send("Microsoft Graph API - APEX Bridge is running 🚀");
-});
+const {
+  CLIENT_ID,
+  CLIENT_SECRET,
+  TENANT_ID,
+  GRAPH_SCOPE,
+  EMAIL_USER
+} = process.env;
 
-app.post("/createMeeting", async (req, res) => {
+// Optional: for debugging — only in dev
+console.log("Loaded ENV:", { CLIENT_ID, TENANT_ID, EMAIL_USER });
+
+let cachedToken = null;
+let tokenExpiry = null;
+
+// 🔐 Get access token dynamically from Azure
+async function getAccessToken() {
+  if (cachedToken && new Date() < tokenExpiry) {
+    return cachedToken;
+  }
+
+  const res = await fetch(`https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      scope: GRAPH_SCOPE,
+      grant_type: "client_credentials"
+    }),
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    console.error("❌ Failed to get token:", data);
+    throw new Error(data.error_description || "Unable to fetch access token");
+  }
+
+  cachedToken = data.access_token;
+  tokenExpiry = new Date(Date.now() + data.expires_in * 1000);
+  return cachedToken;
+}
+
+// 📧 API endpoint to send email
+app.post("/send-mail", async (req, res) => {
   try {
-    const tenantId = "5fbf0bf3-08f7-4648-b12b-ee3b3de59636";
-    const clientId = "a5255c20-3bbd-4f4d-b996-e9d54e5d2077";
-    const clientSecret = process.env.CLIENT_SECRET; // <-- Secret loaded from env
+    const { to, subject, body } = req.body;
+    const token = await getAccessToken();
 
-    const tokenResponse = await axios.post(
-      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-      new URLSearchParams({
-        client_id: clientId,
-        scope: "https://graph.microsoft.com/.default",
-        client_secret: clientSecret,
-        grant_type: "client_credentials",
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-
-    const accessToken = tokenResponse.data.access_token;
-
-    const meetingResponse = await axios.post(
-      "https://graph.microsoft.com/v1.0/me/onlineMeetings",
-      {
-        subject: "APEX Auto Meeting",
-        startDateTime: "2025-11-06T13:30:00Z",
-        endDateTime: "2025-11-06T14:00:00Z",
+    const graphRes = await fetch(`https://graph.microsoft.com/v1.0/users/${EMAIL_USER}/sendMail`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
       },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: "HTML", content: body },
+          toRecipients: [{ emailAddress: { address: to } }]
         },
-      }
-    );
+        saveToSentItems: true
+      })
+    });
 
-    res.json({ meeting: meetingResponse.data });
-  } catch (error) {
-    console.error("Error creating meeting:", error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data || error.message });
+    if (!graphRes.ok) {
+      const error = await graphRes.text();
+      console.error("Graph error:", error);
+      return res.status(500).send({ error });
+    }
+
+    res.send({ status: "✅ Mail sent successfully via Graph API" });
+  } catch (e) {
+    console.error("Exception:", e);
+    res.status(500).send({ error: e.message });
   }
 });
 
-app.listen(10000, () => console.log("Server running on port 10000"));
+app.listen(3000, () => console.log("🚀 Server running on port 3000"));
