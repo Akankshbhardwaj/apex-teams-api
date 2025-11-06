@@ -1,15 +1,10 @@
 import express from "express";
+import msal from "@azure/msal-node";
 import fetch from "node-fetch";
-import dotenv from "dotenv";
-import { ConfidentialClientApplication } from "@azure/msal-node";
 
-dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ===================
-//  Microsoft Config
-// ===================
 const msalConfig = {
   auth: {
     clientId: process.env.CLIENT_ID,
@@ -18,30 +13,28 @@ const msalConfig = {
   }
 };
 
-const REDIRECT_URI = "https://apex-teams-api.onrender.com/auth/callback";
-const SCOPES = ["https://graph.microsoft.com/Mail.Send", "offline_access"];
-const cca = new ConfidentialClientApplication(msalConfig);
+const REDIRECT_URI = "https://apex-teams-api.onrender.com/redirect"; // must match Azure exactly
+const SCOPES = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"];
 
-let tokenResponse = null;
+const pca = new msal.ConfidentialClientApplication(msalConfig);
 
-// ===================
-//  1️⃣  Login endpoint
-// ===================
-app.get("/login", (req, res) => {
+let accessToken = null;
+
+app.get("/login", async (req, res) => {
   const authCodeUrlParameters = {
     scopes: SCOPES,
     redirectUri: REDIRECT_URI
   };
-
-  cca.getAuthCodeUrl(authCodeUrlParameters).then((response) => {
-    res.redirect(response);
-  });
+  try {
+    const authUrl = await pca.getAuthCodeUrl(authCodeUrlParameters);
+    res.redirect(authUrl);
+  } catch (err) {
+    console.error("Error generating auth URL:", err);
+    res.status(500).send("Error generating auth URL");
+  }
 });
 
-// ===================
-//  2️⃣  Callback endpoint
-// ===================
-app.get("/auth/callback", async (req, res) => {
+app.get("/redirect", async (req, res) => {
   const tokenRequest = {
     code: req.query.code,
     scopes: SCOPES,
@@ -49,60 +42,44 @@ app.get("/auth/callback", async (req, res) => {
   };
 
   try {
-    tokenResponse = await cca.acquireTokenByCode(tokenRequest);
-    res.send("✅ Authentication successful! You can now send emails.");
-  } catch (error) {
-    console.error("Error acquiring token:", error);
-    res.status(500).send("Error during authentication.");
+    const response = await pca.acquireTokenByCode(tokenRequest);
+    accessToken = response.accessToken;
+    console.log("✅ Access token acquired successfully!");
+    res.send("✅ Authentication successful! You can now send emails via /send-mail");
+  } catch (err) {
+    console.error("Error acquiring token:", err);
+    res.status(500).send("Error acquiring token: " + err);
   }
 });
 
-// ===================
-//  3️⃣  Send Mail endpoint
-// ===================
 app.post("/send-mail", async (req, res) => {
-  if (!tokenResponse) {
-    return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
-  }
+  if (!accessToken) return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
 
-  const { to, subject, body } = req.body;
-
-  const emailData = {
+  const mail = {
     message: {
-      subject: subject,
-      body: {
-        contentType: "HTML",
-        content: body
-      },
-      toRecipients: [
-        {
-          emailAddress: { address: to }
-        }
-      ]
-    },
-    saveToSentItems: "true"
+      subject: "Hello from Render + APEX",
+      body: { contentType: "Text", content: "This email was sent using Microsoft Graph API!" },
+      toRecipients: [{ emailAddress: { address: req.body.to || "your-email@faramond.in" } }]
+    }
   };
 
   try {
-    const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+    const graphResponse = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${tokenResponse.accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(emailData)
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(mail)
     });
 
-    if (!response.ok) {
-      const err = await response.text();
-      return res.status(response.status).json({ error: "Mail send failed", details: err });
+    if (!graphResponse.ok) {
+      const errText = await graphResponse.text();
+      return res.status(400).json({ error: "Mail send failed", details: errText });
     }
 
-    res.json({ success: true, message: "Email sent successfully 🚀" });
+    res.json({ success: true, message: "Mail sent successfully!" });
   } catch (err) {
     console.error("Error sending mail:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-app.listen(3000, () => console.log("✅ APEX → Microsoft Graph (Delegated) running on port 3000"));
+app.listen(10000, () => console.log("Server running on port 10000 🚀"));
