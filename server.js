@@ -8,6 +8,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
+// ⚙️ Microsoft Identity Config
 const msalConfig = {
   auth: {
     clientId: process.env.CLIENT_ID,
@@ -17,19 +18,26 @@ const msalConfig = {
 };
 
 const REDIRECT_URI = "https://apex-teams-api.onrender.com/redirect"; // Must match exactly in Azure
-const SCOPES = ["https://graph.microsoft.com/.default"];
+
+// ✅ Updated scopes (now includes Calendar permissions)
+const SCOPES = [
+  "https://graph.microsoft.com/User.Read",
+  "https://graph.microsoft.com/Mail.Send",
+  "https://graph.microsoft.com/Calendars.ReadWrite"
+];
 
 const pca = new msal.ConfidentialClientApplication(msalConfig);
 let accessToken = null;
 
+// 🌐 Root route
 app.get("/", (req, res) => {
-  res.send("✅ Microsoft Graph Mail API is running. Visit /login to authenticate.");
+  res.send("✅ Microsoft Graph API is running. Visit /login to authenticate.");
 });
 
-// Step 1: Login
+// Step 1️⃣: Login - Generate Microsoft OAuth URL
 app.get("/login", async (req, res) => {
   const authCodeUrlParameters = {
-    scopes: ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"],
+    scopes: SCOPES,
     redirectUri: REDIRECT_URI
   };
 
@@ -42,7 +50,7 @@ app.get("/login", async (req, res) => {
   }
 });
 
-// Step 2: Redirect from Microsoft
+// Step 2️⃣: Redirect from Microsoft - Exchange code for access token
 app.get("/redirect", async (req, res) => {
   const code = req.query.code;
   if (!code) {
@@ -52,7 +60,7 @@ app.get("/redirect", async (req, res) => {
 
   const tokenRequest = {
     code,
-    scopes: ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"],
+    scopes: SCOPES,
     redirectUri: REDIRECT_URI
   };
 
@@ -60,22 +68,22 @@ app.get("/redirect", async (req, res) => {
     const response = await pca.acquireTokenByCode(tokenRequest);
     accessToken = response.accessToken;
     console.log("✅ Access token acquired successfully!");
-    res.send("✅ Authentication successful! You can now send emails via POST /send-mail");
+    res.send("✅ Authentication successful! You can now send emails and create meetings!");
   } catch (err) {
     console.error("❌ Error acquiring token:", err);
     res.status(500).send("Error acquiring token: " + err.message);
   }
 });
 
-// Step 3: Send Mail
+// Step 3️⃣: Send Mail
 app.post("/send-mail", async (req, res) => {
   if (!accessToken)
     return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
 
   const mail = {
     message: {
-      subject: "Hello from Render + Microsoft Graph",
-      body: { contentType: "Text", content: "This email was sent via Microsoft Graph API!" },
+      subject: req.body.subject || "Hello from Render + Microsoft Graph",
+      body: { contentType: "Text", content: req.body.body || "This email was sent via Microsoft Graph API!" },
       toRecipients: [
         {
           emailAddress: {
@@ -108,7 +116,7 @@ app.post("/send-mail", async (req, res) => {
   }
 });
 
-// ✅ Step 4: Create Meeting (ADD THIS HERE)
+// Step 4️⃣: Create Meeting
 app.post("/create-meeting", async (req, res) => {
   if (!accessToken)
     return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
@@ -166,5 +174,5 @@ app.post("/create-meeting", async (req, res) => {
   }
 });
 
-// ✅ Start server (keep this at the very end)
+// 🚀 Start Server
 app.listen(10000, () => console.log("🚀 Server running on port 10000"));
