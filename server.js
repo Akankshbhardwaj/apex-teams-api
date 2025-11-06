@@ -1,5 +1,5 @@
 import express from "express";
-import msal from "@azure/msal-node";
+import * as msal from "@azure/msal-node";
 import fetch from "node-fetch";
 
 const app = express();
