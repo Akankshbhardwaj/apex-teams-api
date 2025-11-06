@@ -1,16 +1,14 @@
 {
   "name": "apex-teams-api",
   "version": "1.0.0",
-  "description": "APEX integration with Microsoft Teams API",
+  "description": "Node API for Oracle APEX to call Microsoft Graph",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.4.0"
-  },
-  "engines": {
-    "node": "18.x"
+    "axios": "^1.6.0"
   }
 }
