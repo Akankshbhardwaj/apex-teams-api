@@ -108,4 +108,63 @@ app.post("/send-mail", async (req, res) => {
   }
 });
 
+// ✅ Step 4: Create Meeting (ADD THIS HERE)
+app.post("/create-meeting", async (req, res) => {
+  if (!accessToken)
+    return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
+
+  const { subject, start, end, location, description, attendee } = req.body;
+
+  const event = {
+    subject,
+    body: {
+      contentType: "HTML",
+      content: description || "Meeting scheduled via Oracle APEX"
+    },
+    start: {
+      dateTime: start,
+      timeZone: "India Standard Time"
+    },
+    end: {
+      dateTime: end,
+      timeZone: "India Standard Time"
+    },
+    location: {
+      displayName: location || "Online"
+    },
+    attendees: [
+      {
+        emailAddress: {
+          address: attendee,
+          name: attendee
+        },
+        type: "required"
+      }
+    ]
+  };
+
+  try {
+    const response = await fetch("https://graph.microsoft.com/v1.0/me/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(event)
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      return res.status(400).json({ error: "Failed to create event", details: result });
+    }
+
+    res.json({ success: true, message: "Meeting created successfully!", eventId: result.id });
+  } catch (err) {
+    console.error("Error creating event:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ✅ Start server (keep this at the very end)
 app.listen(10000, () => console.log("🚀 Server running on port 10000"));
