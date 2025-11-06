@@ -1,14 +1,13 @@
+// server.js
 import express from "express";
 import * as msal from "@azure/msal-node";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 
-dotenv.config(); // Load environment variables
-
+dotenv.config();
 const app = express();
 app.use(express.json());
 
-// 🟩 MSAL configuration
 const msalConfig = {
   auth: {
     clientId: process.env.CLIENT_ID,
@@ -17,20 +16,20 @@ const msalConfig = {
   }
 };
 
-// 🟩 Redirect URI — must exactly match Azure’s “Redirect URIs” entry
-const REDIRECT_URI = "https://apex-teams-api.onrender.com/redirect";
-
-// 🟩 Scopes (use /.default for app permissions)
+const REDIRECT_URI = "https://apex-teams-api.onrender.com/redirect"; // Must match exactly in Azure
 const SCOPES = ["https://graph.microsoft.com/.default"];
 
 const pca = new msal.ConfidentialClientApplication(msalConfig);
-
 let accessToken = null;
 
-// 🟢 Step 1: Login route
+app.get("/", (req, res) => {
+  res.send("✅ Microsoft Graph Mail API is running. Visit /login to authenticate.");
+});
+
+// Step 1: Login
 app.get("/login", async (req, res) => {
   const authCodeUrlParameters = {
-    scopes: ["User.Read", "Mail.Send"],
+    scopes: ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"],
     redirectUri: REDIRECT_URI
   };
 
@@ -43,11 +42,17 @@ app.get("/login", async (req, res) => {
   }
 });
 
-// 🟢 Step 2: Redirect handler
+// Step 2: Redirect from Microsoft
 app.get("/redirect", async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    console.error("❌ Missing authorization code in redirect");
+    return res.status(400).send("Error: Missing authorization code in redirect. Please retry /login.");
+  }
+
   const tokenRequest = {
-    code: req.query.code,
-    scopes: ["User.Read", "Mail.Send"],
+    code,
+    scopes: ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"],
     redirectUri: REDIRECT_URI
   };
 
@@ -55,30 +60,30 @@ app.get("/redirect", async (req, res) => {
     const response = await pca.acquireTokenByCode(tokenRequest);
     accessToken = response.accessToken;
     console.log("✅ Access token acquired successfully!");
-    res.send("✅ Authentication successful! You can now send emails via /send-mail");
+    res.send("✅ Authentication successful! You can now send emails via POST /send-mail");
   } catch (err) {
     console.error("❌ Error acquiring token:", err);
     res.status(500).send("Error acquiring token: " + err.message);
   }
 });
 
-// 🟢 Step 3: Send mail
+// Step 3: Send Mail
 app.post("/send-mail", async (req, res) => {
   if (!accessToken)
     return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
 
   const mail = {
     message: {
-      subject: req.body.subject || "Hello from Render + APEX 🚀",
-      body: {
-        contentType: "Text",
-        content: req.body.body || "This email was sent using Microsoft Graph API!"
-      },
+      subject: "Hello from Render + Microsoft Graph",
+      body: { contentType: "Text", content: "This email was sent via Microsoft Graph API!" },
       toRecipients: [
-        { emailAddress: { address: req.body.to || "akanksh@faramond.in" } }
+        {
+          emailAddress: {
+            address: req.body.to || "your-email@faramond.in"
+          }
+        }
       ]
-    },
-    saveToSentItems: "true"
+    }
   };
 
   try {
@@ -93,23 +98,14 @@ app.post("/send-mail", async (req, res) => {
 
     if (!graphResponse.ok) {
       const errText = await graphResponse.text();
-      console.error("❌ Graph API error:", errText);
       return res.status(400).json({ error: "Mail send failed", details: errText });
     }
 
-    console.log("✅ Mail sent successfully!");
     res.json({ success: true, message: "Mail sent successfully!" });
   } catch (err) {
-    console.error("❌ Error sending mail:", err);
+    console.error("Error sending mail:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// 🟢 Root route
-app.get("/", (req, res) => {
-  res.send("✅ Microsoft Graph API - APEX Bridge is running 🚀");
-});
-
-// 🟢 Start server
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT} 🚀`));
+app.listen(10000, () => console.log("🚀 Server running on port 10000"));
