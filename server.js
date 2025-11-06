@@ -1,89 +1,108 @@
 import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import { ConfidentialClientApplication } from "@azure/msal-node";
 
 dotenv.config();
-
 const app = express();
 app.use(express.json());
 
-// Root endpoint
-app.get("/", (req, res) => {
-  res.send("✅ Microsoft Graph API - APEX Bridge is running 🚀");
+// ===================
+//  Microsoft Config
+// ===================
+const msalConfig = {
+  auth: {
+    clientId: process.env.CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${process.env.TENANT_ID}`,
+    clientSecret: process.env.CLIENT_SECRET
+  }
+};
+
+const REDIRECT_URI = "https://apex-teams-api.onrender.com/auth/callback";
+const SCOPES = ["https://graph.microsoft.com/Mail.Send", "offline_access"];
+const cca = new ConfidentialClientApplication(msalConfig);
+
+let tokenResponse = null;
+
+// ===================
+//  1️⃣  Login endpoint
+// ===================
+app.get("/login", (req, res) => {
+  const authCodeUrlParameters = {
+    scopes: SCOPES,
+    redirectUri: REDIRECT_URI
+  };
+
+  cca.getAuthCodeUrl(authCodeUrlParameters).then((response) => {
+    res.redirect(response);
+  });
 });
 
-// Send Mail route
-app.post("/send-mail", async (req, res) => {
-  const { to, subject, body } = req.body;
+// ===================
+//  2️⃣  Callback endpoint
+// ===================
+app.get("/auth/callback", async (req, res) => {
+  const tokenRequest = {
+    code: req.query.code,
+    scopes: SCOPES,
+    redirectUri: REDIRECT_URI
+  };
 
   try {
-    // Step 1: Get access token from Microsoft
-    const tokenResponse = await fetch(
-      `https://login.microsoftonline.com/${process.env.TENANT_ID}/oauth2/v2.0/token`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: process.env.CLIENT_ID,
-          scope: process.env.GRAPH_SCOPE,
-          client_secret: process.env.CLIENT_SECRET,
-          grant_type: "client_credentials",
-        }),
-      }
-    );
-
-    const tokenData = await tokenResponse.json();
-    const accessToken = tokenData.access_token;
-
-    if (!accessToken) {
-      console.error("Failed to get access token:", tokenData);
-      return res.status(500).json({ error: "Failed to obtain access token" });
-    }
-
-    // Step 2: Send email via Microsoft Graph
-    const mailPayload = {
-      message: {
-        subject: subject || "No subject",
-        body: {
-          contentType: "HTML",
-          content: body || "No content",
-        },
-        toRecipients: [
-          {
-            emailAddress: {
-              address: to || process.env.EMAIL_USER,
-            },
-          },
-        ],
-      },
-      saveToSentItems: true,
-    };
-
-    const mailResponse = await fetch(
-      `https://graph.microsoft.com/v1.0/users/${process.env.EMAIL_USER}/sendMail`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(mailPayload),
-      }
-    );
-
-    if (!mailResponse.ok) {
-      const error = await mailResponse.text();
-      console.error("Mail send failed:", error);
-      return res.status(500).json({ error: "Mail send failed", details: error });
-    }
-
-    res.json({ message: "✅ Email sent successfully!" });
-  } catch (err) {
-    console.error("Error sending email:", err);
-    res.status(500).json({ error: "Internal Server Error", details: err.message });
+    tokenResponse = await cca.acquireTokenByCode(tokenRequest);
+    res.send("✅ Authentication successful! You can now send emails.");
+  } catch (error) {
+    console.error("Error acquiring token:", error);
+    res.status(500).send("Error during authentication.");
   }
 });
 
-// Start server
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+// ===================
+//  3️⃣  Send Mail endpoint
+// ===================
+app.post("/send-mail", async (req, res) => {
+  if (!tokenResponse) {
+    return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
+  }
+
+  const { to, subject, body } = req.body;
+
+  const emailData = {
+    message: {
+      subject: subject,
+      body: {
+        contentType: "HTML",
+        content: body
+      },
+      toRecipients: [
+        {
+          emailAddress: { address: to }
+        }
+      ]
+    },
+    saveToSentItems: "true"
+  };
+
+  try {
+    const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${tokenResponse.accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(emailData)
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: "Mail send failed", details: err });
+    }
+
+    res.json({ success: true, message: "Email sent successfully 🚀" });
+  } catch (err) {
+    console.error("Error sending mail:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.listen(3000, () => console.log("✅ APEX → Microsoft Graph (Delegated) running on port 3000"));
