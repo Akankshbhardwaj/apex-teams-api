@@ -1,65 +1,72 @@
+// server.js
 import express from "express";
-import axios from "axios";
-import bodyParser from "body-parser";
+import fetch from "node-fetch";
 import dotenv from "dotenv";
 
-dotenv.config(); // Load env vars from Render or .env
-
+dotenv.config();
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-// Read from environment variables
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const TENANT_ID = process.env.TENANT_ID;
-const GRAPH_SCOPE = process.env.GRAPH_SCOPE || "https://graph.microsoft.com/.default";
-const EMAIL_USER = process.env.EMAIL_USER;
-
-// Health check route
 app.get("/", (req, res) => {
-  res.send("🚀 Microsoft Graph API - APEX Bridge is running fine!");
+  res.send("✅ Microsoft Graph API - APEX Bridge is running 🚀");
 });
 
-// Create Microsoft Teams meeting
 app.post("/createMeeting", async (req, res) => {
   try {
-    // 1️⃣ Get Access Token from Azure AD
-    const tokenResponse = await axios.post(
-      `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
-      new URLSearchParams({
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        scope: GRAPH_SCOPE,
-        grant_type: "client_credentials",
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
+    const tenantId = process.env.TENANT_ID;
+    const clientId = process.env.CLIENT_ID;
+    const clientSecret = process.env.CLIENT_SECRET;
+    const graphScope = process.env.GRAPH_SCOPE || "https://graph.microsoft.com/.default";
 
-    const accessToken = tokenResponse.data.access_token;
-
-    // 2️⃣ Create Online Meeting
-    const meetingResponse = await axios.post(
-      `https://graph.microsoft.com/v1.0/users/${EMAIL_USER}/onlineMeetings`,
+    // Step 1: Get Access Token
+    const tokenResponse = await fetch(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
       {
-        subject: "APEX Auto Meeting",
-        startDateTime: "2025-11-06T13:30:00Z",
-        endDateTime: "2025-11-06T14:00:00Z",
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          scope: graphScope,
+          grant_type: "client_credentials",
+        }),
       }
     );
 
-    res.json({ meeting: meetingResponse.data });
-  } catch (error) {
-    console.error("❌ Error creating meeting:", error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data || error.message });
+    const tokenData = await tokenResponse.json();
+    if (!tokenData.access_token) {
+      console.error("Error fetching token:", tokenData);
+      return res.status(500).json({ error: "Failed to get access token", details: tokenData });
+    }
+
+    const accessToken = tokenData.access_token;
+
+    // Step 2: Create Meeting
+    const meetingResponse = await fetch("https://graph.microsoft.com/v1.0/me/onlineMeetings", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        subject: "APEX Auto Meeting via Render",
+        startDateTime: "2025-11-06T13:30:00Z",
+        endDateTime: "2025-11-06T14:00:00Z",
+      }),
+    });
+
+    const meetingData = await meetingResponse.json();
+    if (!meetingResponse.ok) {
+      console.error("Error creating meeting:", meetingData);
+      return res.status(500).json({ error: meetingData });
+    }
+
+    res.json({ meeting: meetingData });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
