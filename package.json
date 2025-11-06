@@ -1,14 +1,15 @@
 {
   "name": "apex-teams-api",
   "version": "1.0.0",
-  "description": "Node API for Oracle APEX to call Microsoft Graph",
+  "description": "Bridge between Oracle APEX and Microsoft Teams API via Render",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.0"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.4.5"
   }
 }
