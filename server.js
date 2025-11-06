@@ -1,86 +1,65 @@
 import express from "express";
-import fetch from "node-fetch";
+import axios from "axios";
 import bodyParser from "body-parser";
+import dotenv from "dotenv";
+
+dotenv.config(); // Load env vars from Render or .env
 
 const app = express();
 app.use(bodyParser.json());
 
-const {
-  CLIENT_ID,
-  CLIENT_SECRET,
-  TENANT_ID,
-  GRAPH_SCOPE,
-  EMAIL_USER
-} = process.env;
+// Read from environment variables
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const TENANT_ID = process.env.TENANT_ID;
+const GRAPH_SCOPE = process.env.GRAPH_SCOPE || "https://graph.microsoft.com/.default";
+const EMAIL_USER = process.env.EMAIL_USER;
 
-// Optional: for debugging — only in dev
-console.log("Loaded ENV:", { CLIENT_ID, TENANT_ID, EMAIL_USER });
+// Health check route
+app.get("/", (req, res) => {
+  res.send("🚀 Microsoft Graph API - APEX Bridge is running fine!");
+});
 
-let cachedToken = null;
-let tokenExpiry = null;
-
-// 🔐 Get access token dynamically from Azure
-async function getAccessToken() {
-  if (cachedToken && new Date() < tokenExpiry) {
-    return cachedToken;
-  }
-
-  const res = await fetch(`https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      scope: GRAPH_SCOPE,
-      grant_type: "client_credentials"
-    }),
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    console.error("❌ Failed to get token:", data);
-    throw new Error(data.error_description || "Unable to fetch access token");
-  }
-
-  cachedToken = data.access_token;
-  tokenExpiry = new Date(Date.now() + data.expires_in * 1000);
-  return cachedToken;
-}
-
-// 📧 API endpoint to send email
-app.post("/send-mail", async (req, res) => {
+// Create Microsoft Teams meeting
+app.post("/createMeeting", async (req, res) => {
   try {
-    const { to, subject, body } = req.body;
-    const token = await getAccessToken();
+    // 1️⃣ Get Access Token from Azure AD
+    const tokenResponse = await axios.post(
+      `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
+      new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        scope: GRAPH_SCOPE,
+        grant_type: "client_credentials",
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
 
-    const graphRes = await fetch(`https://graph.microsoft.com/v1.0/users/${EMAIL_USER}/sendMail`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
+    const accessToken = tokenResponse.data.access_token;
+
+    // 2️⃣ Create Online Meeting
+    const meetingResponse = await axios.post(
+      `https://graph.microsoft.com/v1.0/users/${EMAIL_USER}/onlineMeetings`,
+      {
+        subject: "APEX Auto Meeting",
+        startDateTime: "2025-11-06T13:30:00Z",
+        endDateTime: "2025-11-06T14:00:00Z",
       },
-      body: JSON.stringify({
-        message: {
-          subject,
-          body: { contentType: "HTML", content: body },
-          toRecipients: [{ emailAddress: { address: to } }]
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
         },
-        saveToSentItems: true
-      })
-    });
+      }
+    );
 
-    if (!graphRes.ok) {
-      const error = await graphRes.text();
-      console.error("Graph error:", error);
-      return res.status(500).send({ error });
-    }
-
-    res.send({ status: "✅ Mail sent successfully via Graph API" });
-  } catch (e) {
-    console.error("Exception:", e);
-    res.status(500).send({ error: e.message });
+    res.json({ meeting: meetingResponse.data });
+  } catch (error) {
+    console.error("❌ Error creating meeting:", error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data || error.message });
   }
 });
 
-app.listen(3000, () => console.log("🚀 Server running on port 3000"));
+// Start server
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
