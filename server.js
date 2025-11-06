@@ -4,21 +4,36 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// Root test
+// Root route
 app.get("/", (req, res) => {
   res.send("APEX → Render API → Microsoft Graph working 🚀");
 });
 
 // Endpoint to create a Teams meeting
 app.post("/createMeeting", async (req, res) => {
-  const { accessToken, startDateTime, endDateTime, subject, userEmail } = req.body;
+  const { clientId, clientSecret, tenantId, userEmail, startDateTime, endDateTime, subject } = req.body;
 
-  if (!accessToken || !userEmail) {
+  if (!clientId || !clientSecret || !tenantId || !userEmail) {
     return res.status(400).json({ error: "Missing required parameters" });
   }
 
   try {
-    const response = await axios.post(
+    // Step 1: Get Access Token
+    const tokenResponse = await axios.post(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: "https://graph.microsoft.com/.default",
+        grant_type: "client_credentials"
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+
+    const accessToken = tokenResponse.data.access_token;
+
+    // Step 2: Create Teams Meeting
+    const meetingResponse = await axios.post(
       `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(userEmail)}/onlineMeetings`,
       {
         startDateTime,
@@ -33,9 +48,9 @@ app.post("/createMeeting", async (req, res) => {
       }
     );
 
-    res.json(response.data);
+    res.json(meetingResponse.data);
   } catch (error) {
-    console.error("Error creating meeting:", error.response?.data || error.message);
+    console.error("Error:", error.response?.data || error.message);
     res.status(500).json({ error: error.response?.data || error.message });
   }
 });
