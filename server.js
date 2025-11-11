@@ -17,7 +17,6 @@ const msalConfig = {
 };
 
 const REDIRECT_URI = process.env.REDIRECT_URI || "https://apex-teams-api.onrender.com/redirect";
-
 const SCOPES = [
   "https://graph.microsoft.com/User.Read",
   "https://graph.microsoft.com/Mail.Send",
@@ -28,28 +27,26 @@ const SCOPES = [
 
 const pca = new msal.ConfidentialClientApplication(msalConfig);
 
-// 🧠 Store tokens for each logged-in user (in-memory, can later move to DB)
+// 🧠 Store user tokens (memory or later in DB)
 let userTokens = {};
 
-// 🌐 Root route
+// 🌐 Root check
 app.get("/", (req, res) => {
-  res.send("✅ Microsoft Graph API is running. Visit /login?userEmail=your@email.com to authenticate.");
+  res.send("✅ Microsoft Graph API running. Use /login?userEmail=your@email.com to authenticate.");
 });
 
-
-// Step 1️⃣: Login — Generate Microsoft OAuth URL (no query in redirect)
+// Step 1️⃣ — Login
 app.get("/login", async (req, res) => {
   const userEmail = req.query.userEmail;
-  if (!userEmail) return res.status(400).send("❌ Missing userEmail in query string.");
+  if (!userEmail) return res.status(400).send("❌ Missing userEmail parameter.");
+
+  const authCodeUrlParameters = {
+    scopes: SCOPES,
+    redirectUri: REDIRECT_URI, // ✅ Keep clean redirect URL (no ?userEmail)
+    state: encodeURIComponent(userEmail), // ✅ Pass user email in 'state' safely
+  };
 
   try {
-    // ✅ use `state` instead of query param to safely carry the user email
-    const authCodeUrlParameters = {
-      scopes: SCOPES,
-      redirectUri: REDIRECT_URI,
-      state: userEmail
-    };
-
     const authUrl = await pca.getAuthCodeUrl(authCodeUrlParameters);
     res.redirect(authUrl);
   } catch (err) {
@@ -58,15 +55,11 @@ app.get("/login", async (req, res) => {
   }
 });
 
-
-// Step 2️⃣: Redirect — Exchange code for tokens (email comes from `state`)
+// Step 2️⃣ — Redirect from Microsoft
 app.get("/redirect", async (req, res) => {
   const code = req.query.code;
-  const userEmail = req.query.state; // ✅ email passed via state
-
-  if (!code || !userEmail) {
-    return res.status(400).send("❌ Missing authorization code or user context (state).");
-  }
+  const userEmail = decodeURIComponent(req.query.state || "");
+  if (!code || !userEmail) return res.status(400).send("❌ Missing code or userEmail.");
 
   const tokenRequest = {
     code,
@@ -76,14 +69,11 @@ app.get("/redirect", async (req, res) => {
 
   try {
     const response = await pca.acquireTokenByCode(tokenRequest);
-
     userTokens[userEmail] = {
       accessToken: response.accessToken,
       refreshToken: response.refreshToken,
       expiresOn: response.expiresOn,
-      account: response.account
     };
-
     console.log(`✅ Token acquired for ${userEmail}`);
     res.send(`✅ ${userEmail} authenticated successfully! You can now create meetings and send emails.`);
   } catch (err) {
@@ -92,31 +82,28 @@ app.get("/redirect", async (req, res) => {
   }
 });
 
-
-// ♻️ Utility — Refresh or retrieve existing access token
+// ♻️ Utility — Refresh Access Token
 async function getAccessToken(userEmail) {
-  const tokenData = userTokens[userEmail];
-  if (!tokenData) return null;
+  const accountList = await pca.getTokenCache().getAllAccounts();
+  const account = accountList.find(a => a.username.toLowerCase() === userEmail.toLowerCase());
+  if (!account) return null;
 
   try {
     const refreshed = await pca.acquireTokenSilent({
       scopes: SCOPES,
-      account: tokenData.account,
+      account: account,
     });
-    userTokens[userEmail].accessToken = refreshed.accessToken;
     return refreshed.accessToken;
-  } catch (err) {
-    console.error(`🔁 Token refresh failed for ${userEmail}:`, err.message);
+  } catch (e) {
+    console.error("🔁 Token refresh failed for", userEmail, e.message);
     return null;
   }
 }
 
-
-// Step 3️⃣: Send Email
+// Step 3️⃣ — Send Email
 app.post("/send-mail", async (req, res) => {
   const senderEmail = req.body.sender_email;
-  if (!senderEmail)
-    return res.status(400).json({ error: "Missing sender_email in body." });
+  if (!senderEmail) return res.status(400).json({ error: "Missing sender_email" });
 
   let accessToken = await getAccessToken(senderEmail);
   if (!accessToken)
@@ -127,11 +114,8 @@ app.post("/send-mail", async (req, res) => {
   const mail = {
     message: {
       subject: req.body.subject || "Hello from Oracle APEX + Microsoft Graph",
-      body: {
-        contentType: "HTML",
-        content: req.body.body || "<p>This email was sent via Microsoft Graph API!</p>",
-      },
-      toRecipients: (req.body.toEmails || []).map((email) => ({
+      body: { contentType: "HTML", content: req.body.body || "<p>This is a test email.</p>" },
+      toRecipients: (req.body.toEmails || []).map(email => ({
         emailAddress: { address: email },
       })),
     },
@@ -139,7 +123,7 @@ app.post("/send-mail", async (req, res) => {
   };
 
   try {
-    const graphResponse = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+    const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -148,24 +132,19 @@ app.post("/send-mail", async (req, res) => {
       body: JSON.stringify(mail),
     });
 
-    const text = await graphResponse.text();
-    if (!graphResponse.ok) {
-      return res.status(400).json({ error: "Mail send failed", details: text });
-    }
+    const text = await response.text();
+    if (!response.ok) return res.status(400).json({ error: "Mail send failed", details: text });
 
     res.json({ success: true, message: "📧 Mail sent successfully!" });
   } catch (err) {
-    console.error("Error sending mail:", err);
     res.status(500).json({ error: "Internal server error", details: err.message });
   }
 });
 
-
-// Step 4️⃣: Create Meeting
+// Step 4️⃣ — Create Meeting
 app.post("/create-meeting", async (req, res) => {
   const senderEmail = req.body.sender_email;
-  if (!senderEmail)
-    return res.status(400).json({ error: "Missing sender_email in body." });
+  if (!senderEmail) return res.status(400).json({ error: "Missing sender_email" });
 
   let accessToken = await getAccessToken(senderEmail);
   if (!accessToken)
@@ -173,17 +152,15 @@ app.post("/create-meeting", async (req, res) => {
       error: `User ${senderEmail} not authenticated. Visit /login?userEmail=${senderEmail}`,
     });
 
-  const attendees = (req.body.attendees || []).map((email) => ({
+  const attendees = (req.body.attendees || []).map(email => ({
     emailAddress: { address: email, name: email },
     type: "required",
   }));
 
+  // ✅ No timezone offset added here (keeps your 03:00–03:30 as-is)
   const event = {
     subject: req.body.subject || "Meeting from Oracle APEX",
-    body: {
-      contentType: "HTML",
-      content: req.body.description || "Meeting scheduled via Oracle APEX",
-    },
+    body: { contentType: "HTML", content: req.body.description || "Meeting via Oracle APEX" },
     start: { dateTime: req.body.start, timeZone: "India Standard Time" },
     end: { dateTime: req.body.end, timeZone: "India Standard Time" },
     location: { displayName: req.body.location || "Online" },
@@ -203,9 +180,7 @@ app.post("/create-meeting", async (req, res) => {
     });
 
     const result = await response.json();
-    if (!response.ok) {
-      return res.status(400).json({ error: "Failed to create meeting", details: result });
-    }
+    if (!response.ok) return res.status(400).json({ error: "Failed to create meeting", details: result });
 
     res.json({
       success: true,
@@ -214,11 +189,10 @@ app.post("/create-meeting", async (req, res) => {
       joinUrl: result.onlineMeeting?.joinUrl || "No Teams join link available",
     });
   } catch (err) {
-    console.error("Error creating event:", err);
+    console.error("❌ Error creating event:", err);
     res.status(500).json({ error: "Internal server error", details: err.message });
   }
 });
-
 
 // 🚀 Start Server
 const PORT = process.env.PORT || 10000;
