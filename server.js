@@ -2,20 +2,20 @@ import express from "express";
 import * as msal from "@azure/msal-node";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
-import pkg from "pg";
-const { Pool } = pkg;
+import oracledb from "oracledb";
 
 dotenv.config();
 const app = express();
 app.use(express.json());
 
-// 🗄️ PostgreSQL connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// 🗄️ Oracle DB connection
+const dbConfig = {
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  connectString: process.env.DB_CONNECT
+};
 
-// ⚙️ Microsoft Identity Config
+// ⚙️ Microsoft Config
 const msalConfig = {
   auth: {
     clientId: process.env.CLIENT_ID,
@@ -35,7 +35,13 @@ const SCOPES = [
 
 const pca = new msal.ConfidentialClientApplication(msalConfig);
 
-// 🌐 Step 1️⃣ Login (per user)
+async function getConnection() {
+  return await oracledb.getConnection(dbConfig);
+}
+
+//
+// 🔹 STEP 1: Microsoft Login (per APEX user)
+//
 app.get("/login/:apex_user", async (req, res) => {
   const { apex_user } = req.params;
   const authCodeUrlParameters = {
@@ -52,11 +58,14 @@ app.get("/login/:apex_user", async (req, res) => {
   }
 });
 
-// 🌐 Step 2️⃣ Redirect — store tokens
+//
+// 🔹 STEP 2: Redirect — Save Tokens in Oracle
+//
 app.get("/redirect", async (req, res) => {
   const { apex_user, code } = req.query;
-  if (!code || !apex_user)
+  if (!code || !apex_user) {
     return res.status(400).send("Missing authorization code or user");
+  }
 
   try {
     const response = await pca.acquireTokenByCode({
@@ -65,35 +74,54 @@ app.get("/redirect", async (req, res) => {
       redirectUri: `${REDIRECT_URI}?apex_user=${encodeURIComponent(apex_user)}`
     });
 
-    const accessToken = response.accessToken;
-    const refreshToken = response.refreshToken;
+    const conn = await getConnection();
     const expiresAt = new Date(Date.now() + response.expiresIn * 1000);
 
-    await pool.query(
-      `INSERT INTO ms_graph_tokens (apex_user, access_token, refresh_token, expires_at)
-       VALUES ($1,$2,$3,$4)
-       ON CONFLICT (apex_user)
-       DO UPDATE SET access_token=$2, refresh_token=$3, expires_at=$4`,
-      [apex_user, accessToken, refreshToken, expiresAt]
+    await conn.execute(
+      `
+      MERGE INTO MS_GRAPH_TOKENS t
+      USING (SELECT :user AS apex_user FROM dual) src
+      ON (t.apex_user = src.apex_user)
+      WHEN MATCHED THEN UPDATE SET
+          access_token = :access_token,
+          refresh_token = :refresh_token,
+          expires_at = :expires_at
+      WHEN NOT MATCHED THEN INSERT
+          (apex_user, access_token, refresh_token, expires_at)
+          VALUES (:user, :access_token, :refresh_token, :expires_at)
+      `,
+      {
+        user: apex_user,
+        access_token: response.accessToken,
+        refresh_token: response.refreshToken,
+        expires_at: expiresAt
+      },
+      { autoCommit: true }
     );
 
+    await conn.close();
+
     console.log(`✅ Tokens saved for ${apex_user}`);
-    res.send(`✅ ${apex_user} authenticated successfully!`);
+    res.send(`<h3>✅ ${apex_user} connected successfully to Microsoft!</h3>`);
   } catch (err) {
     console.error("❌ Error acquiring token:", err);
     res.status(500).send("Error acquiring token: " + err.message);
   }
 });
 
-// 🔄 Ensure valid token
+//
+// 🔹 Utility — Ensure Valid Token
+//
 async function ensureAccessToken(apex_user) {
-  const result = await pool.query(
-    "SELECT access_token, refresh_token, expires_at FROM ms_graph_tokens WHERE apex_user=$1",
+  const conn = await getConnection();
+  const result = await conn.execute(
+    `SELECT access_token, refresh_token, expires_at FROM MS_GRAPH_TOKENS WHERE apex_user = :user`,
     [apex_user]
   );
-  if (result.rows.length === 0) throw new Error("User not authenticated");
+  await conn.close();
 
-  let { access_token, refresh_token, expires_at } = result.rows[0];
+  if (result.rows.length === 0) throw new Error("User not authenticated");
+  let [access_token, refresh_token, expires_at] = result.rows[0];
 
   if (new Date(expires_at) < new Date()) {
     console.log(`🔄 Refreshing token for ${apex_user}...`);
@@ -101,21 +129,35 @@ async function ensureAccessToken(apex_user) {
       refreshToken: refresh_token,
       scopes: SCOPES
     });
-    access_token = tokenResponse.accessToken;
-    refresh_token = tokenResponse.refreshToken;
-    expires_at = new Date(Date.now() + tokenResponse.expiresIn * 1000);
 
-    await pool.query(
-      `UPDATE ms_graph_tokens SET access_token=$1, refresh_token=$2, expires_at=$3 WHERE apex_user=$4`,
-      [access_token, refresh_token, expires_at, apex_user]
+    const conn2 = await getConnection();
+    const newExpires = new Date(Date.now() + tokenResponse.expiresIn * 1000);
+
+    await conn2.execute(
+      `
+      UPDATE MS_GRAPH_TOKENS
+      SET access_token = :a, refresh_token = :r, expires_at = :e
+      WHERE apex_user = :u
+      `,
+      {
+        a: tokenResponse.accessToken,
+        r: tokenResponse.refreshToken,
+        e: newExpires,
+        u: apex_user
+      },
+      { autoCommit: true }
     );
+    await conn2.close();
     console.log(`✅ Token refreshed for ${apex_user}`);
+    return tokenResponse.accessToken;
   }
 
   return access_token;
 }
 
-// 📧 Send Mail (per APEX user)
+//
+// 🔹 Send Email per user
+//
 app.post("/send-mail/:apex_user", async (req, res) => {
   const { apex_user } = req.params;
   try {
@@ -150,7 +192,9 @@ app.post("/send-mail/:apex_user", async (req, res) => {
   }
 });
 
-// 📅 Create Meeting (per APEX user)
+//
+// 🔹 Create Teams Meeting per user
+//
 app.post("/create-meeting/:apex_user", async (req, res) => {
   const { apex_user } = req.params;
   try {
@@ -195,5 +239,7 @@ app.post("/create-meeting/:apex_user", async (req, res) => {
   }
 });
 
-// 🚀 Start
-app.listen(10000, () => console.log("🚀 Multi-user Teams API running on port 10000"));
+//
+// 🚀 Start server
+//
+app.listen(10000, () => console.log("🚀 Oracle APEX Teams API running on port 10000"));
