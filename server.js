@@ -1,12 +1,19 @@
-// server.js
 import express from "express";
 import * as msal from "@azure/msal-node";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import pkg from "pg";
+const { Pool } = pkg;
 
 dotenv.config();
 const app = express();
 app.use(express.json());
+
+// 🗄️ PostgreSQL connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 // ⚙️ Microsoft Identity Config
 const msalConfig = {
@@ -17,9 +24,7 @@ const msalConfig = {
   }
 };
 
-const REDIRECT_URI = "https://apex-teams-api.onrender.com/redirect"; // Must match Azure redirect URL exactly
-
-// ✅ Scopes needed for Mail, Calendar & Teams meetings
+const REDIRECT_URI = "https://apex-teams-api.onrender.com/redirect";
 const SCOPES = [
   "https://graph.microsoft.com/User.Read",
   "https://graph.microsoft.com/Mail.Send",
@@ -29,18 +34,13 @@ const SCOPES = [
 ];
 
 const pca = new msal.ConfidentialClientApplication(msalConfig);
-let accessToken = null;
 
-// 🌐 Root route
-app.get("/", (req, res) => {
-  res.send("✅ Microsoft Graph API server is running. Visit /login to authenticate.");
-});
-
-// Step 1️⃣: Login - Generate Microsoft OAuth URL
-app.get("/login", async (req, res) => {
+// 🌐 Step 1️⃣ Login (per user)
+app.get("/login/:apex_user", async (req, res) => {
+  const { apex_user } = req.params;
   const authCodeUrlParameters = {
     scopes: SCOPES,
-    redirectUri: REDIRECT_URI
+    redirectUri: `${REDIRECT_URI}?apex_user=${encodeURIComponent(apex_user)}`
   };
 
   try {
@@ -52,132 +52,148 @@ app.get("/login", async (req, res) => {
   }
 });
 
-// Step 2️⃣: Redirect from Microsoft - Exchange code for access token
+// 🌐 Step 2️⃣ Redirect — store tokens
 app.get("/redirect", async (req, res) => {
-  const code = req.query.code;
-  if (!code) {
-    console.error("❌ Missing authorization code in redirect");
-    return res.status(400).send("Error: Missing authorization code. Retry /login.");
-  }
-
-  const tokenRequest = {
-    code,
-    scopes: SCOPES,
-    redirectUri: REDIRECT_URI
-  };
+  const { apex_user, code } = req.query;
+  if (!code || !apex_user)
+    return res.status(400).send("Missing authorization code or user");
 
   try {
-    const response = await pca.acquireTokenByCode(tokenRequest);
-    accessToken = response.accessToken;
-    console.log("✅ Access token acquired successfully!");
-    res.send("✅ Authentication successful! You can now send emails and create meetings!");
+    const response = await pca.acquireTokenByCode({
+      code,
+      scopes: SCOPES,
+      redirectUri: `${REDIRECT_URI}?apex_user=${encodeURIComponent(apex_user)}`
+    });
+
+    const accessToken = response.accessToken;
+    const refreshToken = response.refreshToken;
+    const expiresAt = new Date(Date.now() + response.expiresIn * 1000);
+
+    await pool.query(
+      `INSERT INTO ms_graph_tokens (apex_user, access_token, refresh_token, expires_at)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (apex_user)
+       DO UPDATE SET access_token=$2, refresh_token=$3, expires_at=$4`,
+      [apex_user, accessToken, refreshToken, expiresAt]
+    );
+
+    console.log(`✅ Tokens saved for ${apex_user}`);
+    res.send(`✅ ${apex_user} authenticated successfully!`);
   } catch (err) {
     console.error("❌ Error acquiring token:", err);
     res.status(500).send("Error acquiring token: " + err.message);
   }
 });
 
-// Step 3️⃣: Send Mail
-app.post("/send-mail", async (req, res) => {
-  if (!accessToken)
-    return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
+// 🔄 Ensure valid token
+async function ensureAccessToken(apex_user) {
+  const result = await pool.query(
+    "SELECT access_token, refresh_token, expires_at FROM ms_graph_tokens WHERE apex_user=$1",
+    [apex_user]
+  );
+  if (result.rows.length === 0) throw new Error("User not authenticated");
 
-  const mail = {
-    message: {
-      subject: req.body.subject || "Hello from Oracle APEX + Microsoft Graph",
-      body: {
-        contentType: "HTML",
-        content: req.body.body || "<p>This email was sent via Microsoft Graph API!</p>"
-      },
-      toRecipients: (req.body.toEmails || []).map(email => ({
-        emailAddress: { address: email }
-      }))
-    },
-    saveToSentItems: "true"
-  };
+  let { access_token, refresh_token, expires_at } = result.rows[0];
 
+  if (new Date(expires_at) < new Date()) {
+    console.log(`🔄 Refreshing token for ${apex_user}...`);
+    const tokenResponse = await pca.acquireTokenByRefreshToken({
+      refreshToken: refresh_token,
+      scopes: SCOPES
+    });
+    access_token = tokenResponse.accessToken;
+    refresh_token = tokenResponse.refreshToken;
+    expires_at = new Date(Date.now() + tokenResponse.expiresIn * 1000);
+
+    await pool.query(
+      `UPDATE ms_graph_tokens SET access_token=$1, refresh_token=$2, expires_at=$3 WHERE apex_user=$4`,
+      [access_token, refresh_token, expires_at, apex_user]
+    );
+    console.log(`✅ Token refreshed for ${apex_user}`);
+  }
+
+  return access_token;
+}
+
+// 📧 Send Mail (per APEX user)
+app.post("/send-mail/:apex_user", async (req, res) => {
+  const { apex_user } = req.params;
   try {
-    const graphResponse = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+    const token = await ensureAccessToken(apex_user);
+
+    const mail = {
+      message: {
+        subject: req.body.subject || "Mail from Oracle APEX",
+        body: { contentType: "HTML", content: req.body.body || "APEX Mail" },
+        toRecipients: (req.body.toEmails || []).map(email => ({
+          emailAddress: { address: email }
+        }))
+      },
+      saveToSentItems: "true"
+    };
+
+    const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(mail)
     });
 
-    if (!graphResponse.ok) {
-      const errText = await graphResponse.text();
-      return res.status(400).json({ error: "Mail send failed", details: errText });
-    }
+    const result = await response.text();
+    if (!response.ok) return res.status(400).json({ error: "Mail failed", details: result });
 
     res.json({ success: true, message: "📧 Mail sent successfully!" });
   } catch (err) {
-    console.error("Error sending mail:", err);
-    res.status(500).json({ error: "Internal server error" });
+    res.status(401).json({ error: err.message });
   }
 });
 
-// Step 4️⃣: Create Meeting (Multiple attendees + Teams join link)
-app.post("/create-meeting", async (req, res) => {
-  if (!accessToken)
-    return res.status(401).json({ error: "User not authenticated yet. Visit /login first." });
-
-  // Extract attendees array from request
-  const attendees = (req.body.attendees || []).map(email => ({
-    emailAddress: { address: email, name: email },
-    type: "required"
-  }));
-
-  const event = {
-    subject: req.body.subject || "Meeting from Oracle APEX",
-    body: {
-      contentType: "HTML",
-      content: req.body.description || "Meeting scheduled via Oracle APEX"
-    },
-    start: {
-      dateTime: req.body.start,
-      timeZone: "India Standard Time"
-    },
-    end: {
-      dateTime: req.body.end,
-      timeZone: "India Standard Time"
-    },
-    location: {
-      displayName: req.body.location || "Online"
-    },
-    attendees: attendees,
-    isOnlineMeeting: true,
-    onlineMeetingProvider: "teamsForBusiness"
-  };
-
+// 📅 Create Meeting (per APEX user)
+app.post("/create-meeting/:apex_user", async (req, res) => {
+  const { apex_user } = req.params;
   try {
+    const token = await ensureAccessToken(apex_user);
+
+    const attendees = (req.body.attendees || []).map(email => ({
+      emailAddress: { address: email, name: email },
+      type: "required"
+    }));
+
+    const event = {
+      subject: req.body.subject,
+      body: { contentType: "HTML", content: req.body.description },
+      start: { dateTime: req.body.start, timeZone: "India Standard Time" },
+      end: { dateTime: req.body.end, timeZone: "India Standard Time" },
+      location: { displayName: req.body.location },
+      attendees,
+      isOnlineMeeting: true,
+      onlineMeetingProvider: "teamsForBusiness"
+    };
+
     const response = await fetch("https://graph.microsoft.com/v1.0/me/events", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(event)
     });
 
     const result = await response.json();
-
-    if (!response.ok) {
+    if (!response.ok)
       return res.status(400).json({ error: "Failed to create event", details: result });
-    }
 
     res.json({
       success: true,
-      message: "📅 Meeting created successfully!",
       eventId: result.id,
-      joinUrl: result.onlineMeeting?.joinUrl || "No Teams join link available"
+      joinUrl: result.onlineMeeting?.joinUrl || "No Teams link"
     });
   } catch (err) {
-    console.error("Error creating event:", err);
-    res.status(500).json({ error: "Internal server error" });
+    res.status(401).json({ error: err.message });
   }
 });
 
-// 🚀 Start server
-app.listen(10000, () => console.log("🚀 Server running on port 10000"));
+// 🚀 Start
+app.listen(10000, () => console.log("🚀 Multi-user Teams API running on port 10000"));
